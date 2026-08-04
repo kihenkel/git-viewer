@@ -1,4 +1,4 @@
-import type { CommitSummary, Repository } from "./types";
+import type { CommitDetails, CommitSummary, Repository } from "./types";
 
 export const sampleRepositories: Repository[] = [
   {
@@ -26,6 +26,21 @@ export const sampleCommits: CommitSummary[] = [
   { oid: "d91b4cae412", shortOid: "d91b4ca", parents: ["7c39ea0"], subject: "Avoid redundant history queries on focus", author: "Maya Chen", timestamp: Date.now() / 1000 - 172800, refs: ["v0.1.0"] },
   { oid: "7c39ea0b371", shortOid: "7c39ea0", parents: [], subject: "Create the application shell", author: "Jon Bell", timestamp: Date.now() / 1000 - 345600, refs: [] },
 ];
+
+const sampleCommitFiles = [
+  { path: "src/components/DiffView.tsx", status: "M", section: "commit" as const },
+  { path: "src/diff.ts", status: "M", section: "commit" as const },
+  { path: "src/styles.css", status: "M", section: "commit" as const },
+];
+
+export const sampleCommitDetails: Record<string, CommitDetails> = Object.fromEntries(
+  sampleCommits.map((commit) => [commit.oid, {
+    ...commit,
+    body: "This change improves the working tree experience while keeping repository operations fast and predictable.",
+    email: `${commit.author.toLowerCase().replace(/ /g, ".")}@example.com`,
+    files: sampleCommitFiles,
+  }]),
+);
 
 export const sampleDiff = `diff --git a/src/components/DiffView.tsx b/src/components/DiffView.tsx
 index 48a53e1..8e42ca1 100644

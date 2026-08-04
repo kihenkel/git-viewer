@@ -3,47 +3,101 @@ mod git;
 use git::{ChangeAction, GitService};
 
 #[tauri::command]
-fn check_git() -> git::GitVersion {
-    GitService::check()
+async fn check_git() -> git::GitVersion {
+    match tauri::async_runtime::spawn_blocking(GitService::check).await {
+        Ok(version) => version,
+        Err(error) => git::GitVersion {
+            available: false,
+            version: None,
+            error: Some(format!("Could not check Git: {error}")),
+        },
+    }
 }
 
 #[tauri::command]
-fn load_repository(path: String) -> Result<git::Repository, String> {
-    GitService::repository(&path)
+async fn load_repository(path: String) -> Result<git::Repository, String> {
+    run_blocking(move || GitService::repository(&path)).await?
 }
 
 #[tauri::command]
-fn load_history(
+async fn load_history(
     path: String,
     skip: usize,
     limit: usize,
 ) -> Result<Vec<git::CommitSummary>, String> {
-    GitService::history(&path, skip, limit.min(250))
+    run_blocking(move || GitService::history(&path, skip, limit.min(250))).await?
 }
 
 #[tauri::command]
-fn load_commit(path: String, oid: String) -> Result<git::CommitDetails, String> {
-    GitService::commit(&path, &oid)
+async fn load_commit(path: String, oid: String) -> Result<git::CommitDetails, String> {
+    run_blocking(move || GitService::commit(&path, &oid)).await?
 }
 
 #[tauri::command]
-fn load_diff(
+async fn load_diff(
     path: String,
     file: String,
+    old_file: Option<String>,
     section: String,
     oid: Option<String>,
 ) -> Result<String, String> {
-    GitService::diff(&path, &file, &section, oid.as_deref())
+    run_blocking(move || {
+        GitService::diff(&path, &file, &section, oid.as_deref(), old_file.as_deref())
+    })
+    .await?
 }
 
 #[tauri::command]
-fn change_file(path: String, file: String, action: ChangeAction) -> Result<(), String> {
-    GitService::change_file(&path, &file, action)
+async fn change_file(
+    path: String,
+    file: String,
+    old_file: Option<String>,
+    section: String,
+    action: ChangeAction,
+) -> Result<(), String> {
+    run_blocking(move || {
+        GitService::change_file(&path, &file, old_file.as_deref(), &section, action)
+    })
+    .await?
 }
 
 #[tauri::command]
-fn apply_patch(path: String, patch: String, reverse: bool) -> Result<(), String> {
-    GitService::apply_patch(&path, patch.as_bytes(), reverse)
+async fn trash_info(path: String, file: String) -> Result<git::TrashInfo, String> {
+    run_blocking(move || GitService::trash_info(&path, &file)).await?
+}
+
+#[tauri::command]
+async fn apply_patch(
+    path: String,
+    file: String,
+    old_file: Option<String>,
+    section: String,
+    expected_diff: String,
+    patch: String,
+    reverse: bool,
+) -> Result<(), String> {
+    run_blocking(move || {
+        GitService::apply_patch(
+            &path,
+            &file,
+            old_file.as_deref(),
+            &section,
+            &expected_diff,
+            patch.as_bytes(),
+            reverse,
+        )
+    })
+    .await?
+}
+
+async fn run_blocking<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("Background task failed: {error}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -57,8 +111,9 @@ pub fn run() {
             load_commit,
             load_diff,
             change_file,
+            trash_info,
             apply_patch
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Tempo");
+        .expect("failed to run Git Tempo");
 }

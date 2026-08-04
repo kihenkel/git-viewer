@@ -1,5 +1,5 @@
 export type Theme = "system" | "light" | "dark";
-export type ChangeSection = "staged" | "unstaged" | "untracked";
+export type ChangeSection = "staged" | "unstaged" | "untracked" | "commit";
 
 export interface Repository {
   path: string;
@@ -9,6 +9,7 @@ export interface Repository {
   ahead: number;
   behind: number;
   changes: ChangedFile[];
+  error?: string;
 }
 
 export interface ChangedFile {
@@ -46,6 +47,10 @@ export interface DiffLine {
 export interface DiffHunk {
   id: string;
   header: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
   lines: DiffLine[];
 }
 
@@ -54,10 +59,17 @@ export interface DiffDocument {
   header: string[];
   hunks: DiffHunk[];
   binary: boolean;
+  lineSelectionReason?: string;
 }
 
 export interface GitVersion {
   available: boolean;
   version?: string;
   error?: string;
+}
+
+export interface TrashInfo {
+  isDirectory: boolean;
+  entryCount: number;
+  containsNestedRepository: boolean;
 }

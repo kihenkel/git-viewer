@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tempo",
+  "productName": "Git Tempo",
   "version": "0.1.0",
   "identifier": "com.tempo.gitviewer",
   "build": {
@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Tempo", "width": 1320, "height": 820, "minWidth": 900, "minHeight": 600, "center": true }],
+    "windows": [{ "title": "Git Tempo", "width": 1320, "height": 820, "minWidth": 900, "minHeight": 600, "center": true }],
     "security": { "csp": null }
   },
   "bundle": {

@@ -1,20 +1,20 @@
-# Tempo
+# Git Tempo
 
-Tempo is a fast, focused Git viewer for Windows and macOS. It keeps multiple local repositories in one window and deliberately limits its scope to browsing history, understanding changes, and shaping the staging area.
+Git Tempo is a fast, focused Git viewer for Windows and macOS. It keeps multiple local repositories in one window and deliberately limits its scope to browsing history, understanding changes, and shaping the staging area.
 
 ## Features
 
 - Single-window repository workspace with a collapsible sidebar
 - Staged, unstaged, and untracked file groups
 - Lazy, line-numbered unified diff rendering
-- Whole-file and hunk staging and unstaging
+- Whole-file, hunk, and supported individual-line staging and unstaging
 - Safe untracked-file removal through Trash or Recycle Bin
 - Incrementally loaded history for all commits reachable from the current branch
 - System, light, and dark themes
 - Focus refresh with retained UI state
 - Native Git behavior through the user's installed `git` executable
 
-Tempo does not commit, push, pull, fetch, merge, rebase, or switch branches.
+Git Tempo does not commit, push, pull, fetch, merge, rebase, or switch branches.
 
 ## Prerequisites
 

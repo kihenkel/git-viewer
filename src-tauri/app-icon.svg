@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tempo-gradient" x1="180" y1="120" x2="844" y2="904" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#927CF0"/>
+      <stop offset="1" stop-color="#5D45C3"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#tempo-gradient)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="68">
+    <path d="M354 268v386"/>
+    <circle cx="670" cy="336" r="102"/>
+    <circle cx="354" cy="756" r="102"/>
+    <path d="M670 438c0 176-96 318-214 318"/>
+  </g>
+</svg>

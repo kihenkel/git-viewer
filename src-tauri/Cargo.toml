@@ -2,7 +2,7 @@
 name = "git-viewer"
 version = "0.1.0"
 description = "A fast, focused Git viewer"
-authors = ["Tempo Contributors"]
+authors = ["Git Tempo Contributors"]
 edition = "2021"
 
 [lib]
