@@ -1,4 +1,5 @@
 import {
+  Children,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -6,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveRestore, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
@@ -56,6 +58,9 @@ interface RepositorySession {
   commitDiffKey: string | null;
   commitDiffCache: Record<string, DiffDocument>;
   commitDiffOrder: string[];
+  changesPaneSizes: number[];
+  historyPaneSizes: number[];
+  historyDiffPaneSizes: number[];
   fileScrollTop: number;
   historyScrollTop: number;
   loading: LoadingState;
@@ -122,6 +127,9 @@ function createSession(repository: Repository): RepositorySession {
     commitDiffKey: null,
     commitDiffCache: {},
     commitDiffOrder: [],
+    changesPaneSizes: [29, 71],
+    historyPaneSizes: [40, 60],
+    historyDiffPaneSizes: [28, 30, 42],
     fileScrollTop: 0,
     historyScrollTop: 0,
     loading: idleLoading(),
@@ -774,7 +782,12 @@ export default function App() {
       {!active ? <EmptyState onOpen={addRepository}/>
         : active.error ? <RepositoryUnavailable repository={active} onRetry={() => void refreshRepository(active.path)} onRemove={() => removeRepository(active.path)}/>
         : !session ? <BootScreen/>
-        : session.view === "changes" ? <div className="workspace changes-workspace">
+        : session.view === "changes" ? <ResizableWorkspace
+          className="changes-workspace"
+          sizes={session.changesPaneSizes}
+          minSizes={[220, 320]}
+          onSizesChange={(changesPaneSizes) => updateSession(active.path, (current) => ({ ...current, changesPaneSizes }))}
+        >
           <ChangeList
             grouped={grouped}
             selected={selectedFile}
@@ -812,7 +825,7 @@ export default function App() {
             onApplyHunk={(hunkId) => void applySelection(new Set([hunkId]), new Set())}
             onAction={fileAction}
           />
-        </div> : <HistoryView
+        </ResizableWorkspace> : <HistoryView
           session={session}
           selected={selectedCommit}
           details={selectedCommitDetails}
@@ -821,6 +834,8 @@ export default function App() {
           onScroll={(historyScrollTop) => updateSession(active.path, (current) => ({ ...current, historyScrollTop }))}
           onSelect={selectCommit}
           onSelectFile={selectCommitFile}
+          onPaneSizesChange={(historyPaneSizes) => updateSession(active.path, (current) => ({ ...current, historyPaneSizes }))}
+          onDiffPaneSizesChange={(historyDiffPaneSizes) => updateSession(active.path, (current) => ({ ...current, historyDiffPaneSizes }))}
           onBackToDetails={() => updateSession(active.path, (current) => ({ ...current, selectedCommitFile: null, commitDiffKey: null }))}
           onLoadMore={() => void loadHistoryPage(active.path, false)}
           onCopyOid={(oid) => void navigator.clipboard.writeText(oid)
@@ -829,6 +844,99 @@ export default function App() {
         />}
     </main>
     {notice && <div className="toast" role="status"><Check size={15}/><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={14}/></button></div>}
+  </div>;
+}
+
+const RESIZE_HANDLE_WIDTH = 6;
+
+function ResizableWorkspace({ className, sizes, minSizes, onSizesChange, children }: {
+  className: string;
+  sizes: number[];
+  minSizes: number[];
+  onSizesChange: (sizes: number[]) => void;
+  children: ReactNode;
+}) {
+  const workspace = useRef<HTMLDivElement>(null);
+  const panes = Children.toArray(children);
+  const paneCount = panes.length;
+  const onSizesChangeRef = useRef(onSizesChange);
+  const minSizesRef = useRef(minSizes);
+  const drag = useRef<{ index: number; startX: number; sizes: number[] } | null>(null);
+  const [activeHandle, setActiveHandle] = useState<number | null>(null);
+  onSizesChangeRef.current = onSizesChange;
+  minSizesRef.current = minSizes;
+
+  const resizePair = useCallback((index: number, original: number[], deltaPercent: number) => {
+    const pairTotal = original[index] + original[index + 1];
+    const rect = workspace.current?.getBoundingClientRect();
+    const availableWidth = Math.max(1, (rect?.width || window.innerWidth) - (paneCount - 1) * RESIZE_HANDLE_WIDTH);
+    let leftMinimum = minSizesRef.current[index] / availableWidth * 100;
+    let rightMinimum = minSizesRef.current[index + 1] / availableWidth * 100;
+    if (leftMinimum + rightMinimum > pairTotal) {
+      const scale = pairTotal / (leftMinimum + rightMinimum);
+      leftMinimum *= scale;
+      rightMinimum *= scale;
+    }
+    const left = Math.max(leftMinimum, Math.min(pairTotal - rightMinimum, original[index] + deltaPercent));
+    const next = [...original];
+    next[index] = Math.round(left * 1000) / 1000;
+    next[index + 1] = Math.round((pairTotal - left) * 1000) / 1000;
+    onSizesChangeRef.current(next);
+  }, [paneCount]);
+
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      if (!drag.current) return;
+      event.preventDefault();
+      const rect = workspace.current?.getBoundingClientRect();
+      const availableWidth = Math.max(1, (rect?.width || window.innerWidth) - (paneCount - 1) * RESIZE_HANDLE_WIDTH);
+      resizePair(drag.current.index, drag.current.sizes, (event.clientX - drag.current.startX) / availableWidth * 100);
+    };
+    const finishResize = () => {
+      drag.current = null;
+      setActiveHandle(null);
+      document.body.classList.remove("resizing-columns");
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+      document.body.classList.remove("resizing-columns");
+    };
+  }, [paneCount, resizePair]);
+
+  const onHandleKeyDown = (event: ReactKeyboardEvent, index: number) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    resizePair(index, sizes, event.key === "ArrowLeft" ? -2 : 2);
+  };
+  const columns = sizes.flatMap((size, index) => index === sizes.length - 1 ? [`${size}fr`] : [`${size}fr`, `${RESIZE_HANDLE_WIDTH}px`]).join(" ");
+
+  return <div className={`workspace resizable-workspace ${className}`} ref={workspace} style={{ gridTemplateColumns: columns }}>
+    {panes.flatMap((pane, index) => index === panes.length - 1 ? [pane] : [
+      pane,
+      <div
+        className={`resize-handle ${activeHandle === index ? "active" : ""}`}
+        key={`resize-${index}`}
+        role="separator"
+        aria-label={`Resize panels ${index + 1} and ${index + 2}`}
+        aria-orientation="vertical"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(sizes[index])}
+        tabIndex={0}
+        onKeyDown={(event) => onHandleKeyDown(event, index)}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          drag.current = { index, startX: event.clientX, sizes: [...sizes] };
+          setActiveHandle(index);
+          document.body.classList.add("resizing-columns");
+        }}
+      ><span/></div>,
+    ])}
   </div>;
 }
 
@@ -889,7 +997,7 @@ function DiffPanel({ diff, file, loading, busy, error, selectedHunks, setSelecte
   </section>;
 }
 
-function HistoryView({ session, selected, details, diff, onFilter, onScroll, onSelect, onSelectFile, onBackToDetails, onLoadMore, onCopyOid }: {
+function HistoryView({ session, selected, details, diff, onFilter, onScroll, onSelect, onSelectFile, onPaneSizesChange, onDiffPaneSizesChange, onBackToDetails, onLoadMore, onCopyOid }: {
   session: RepositorySession;
   selected: CommitSummary | null;
   details?: CommitDetails;
@@ -898,20 +1006,43 @@ function HistoryView({ session, selected, details, diff, onFilter, onScroll, onS
   onScroll: (value: number) => void;
   onSelect: (commit: CommitSummary) => void;
   onSelectFile: (file: ChangedFile) => void;
+  onPaneSizesChange: (sizes: number[]) => void;
+  onDiffPaneSizesChange: (sizes: number[]) => void;
   onBackToDetails: () => void;
   onLoadMore: () => void;
   onCopyOid: (oid: string) => void;
 }) {
   const query = session.commitFilter.trim().toLocaleLowerCase();
   const commits = useMemo(() => session.commits.filter((commit) => `${commit.subject} ${commit.author} ${commit.oid}`.toLocaleLowerCase().includes(query)), [query, session.commits]);
-  return <div className="workspace history-workspace"><section className="commit-list" aria-busy={session.loading.history}><div className="panel-toolbar"><div className="search"><Search size={14}/><input data-commit-filter aria-label="Filter commits" placeholder="Filter commits…" value={session.commitFilter} onChange={(event) => onFilter(event.target.value)}/></div></div><div className="date-label">ALL REACHABLE COMMITS</div>
+  const showingDiff = !!session.selectedCommitFile && !!selected;
+  return <ResizableWorkspace
+    className={`history-workspace ${showingDiff ? "showing-diff" : ""}`}
+    sizes={showingDiff ? session.historyDiffPaneSizes : session.historyPaneSizes}
+    minSizes={showingDiff ? [180, 210, 260] : [260, 320]}
+    onSizesChange={showingDiff ? onDiffPaneSizesChange : onPaneSizesChange}
+  ><section className="commit-list" aria-busy={session.loading.history}><div className="panel-toolbar"><div className="search"><Search size={14}/><input data-commit-filter aria-label="Filter commits" placeholder="Filter commits…" value={session.commitFilter} onChange={(event) => onFilter(event.target.value)}/></div></div><div className="date-label">ALL REACHABLE COMMITS</div>
     {session.loading.history && session.commits.length === 0 ? <ListSkeleton/> : commits.length === 0 ? <p className="empty-list">{query ? "No matching commits" : "No commits reachable from this branch"}</p> : <VirtualCommitList commits={commits} selected={selected} scrollTop={session.historyScrollTop} hasMore={session.historyHasMore && !query} loading={session.loading.history} onScroll={onScroll} onSelect={onSelect} onLoadMore={onLoadMore}/>}
-  </section><section className={`commit-detail ${session.selectedCommitFile ? "showing-diff" : ""}`}>
-    {session.selectedCommitFile && selected ? <CommitDiffView commit={selected} file={session.selectedCommitFile} diff={diff} loading={session.loading.commitDiff} onBack={onBackToDetails}/>
-      : !selected ? <div className="commit-placeholder"><History size={32}/><h2>Select a commit</h2><p>Metadata and changed files load only after selection.</p></div>
-        : session.loading.commit && !details ? <DetailsSkeleton/>
-          : details ? <><div className="commit-heading"><div><span className="eyebrow">COMMIT</span><h2>{details.subject}</h2></div><button className="secondary" onClick={() => onCopyOid(details.oid)} title="Copy full commit ID"><Clipboard size={14}/>{details.shortOid}</button></div>{details.parents.length > 1 && <div className="merge-note"><GitBranch size={13}/>Merge commit · files and diffs are compared with first parent {details.parents[0].slice(0, 7)}</div>}<p className={`commit-message ${details.body ? "" : "muted"}`}>{details.body || "No additional commit message."}</p><div className="metadata"><div className="avatar">{details.author.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div><div><strong>{details.author}</strong><small>{details.email} · {new Date(details.timestamp * 1000).toLocaleString()}</small></div></div><div className="commit-files-title"><strong>Changed files</strong><span>{details.files.length} file{details.files.length === 1 ? "" : "s"}</span></div>{details.files.length === 0 ? <p className="empty-list">No files changed against the first parent.</p> : details.files.map((file) => <button className="commit-file" key={`${file.status}:${file.oldPath ?? ""}:${file.path}`} onClick={() => onSelectFile(file)}><FileCode2 size={16}/><span>{file.path}{file.oldPath && <small>renamed from {file.oldPath}</small>}</span><b className={`status ${statusLabel(file.status)}`}>{statusLabel(file.status)}</b><ChevronRight size={14}/></button>)}</> : <div className="inline-error"><CircleAlert size={14}/>Commit details could not be loaded.</div>}
-  </section></div>;
+  </section><CommitDetailsPane session={session} selected={selected} details={details} selectedFile={session.selectedCommitFile} onSelectFile={onSelectFile} onCopyOid={onCopyOid}/>
+    {showingDiff && session.selectedCommitFile && selected && <section className="commit-diff-panel"><CommitDiffView commit={selected} file={session.selectedCommitFile} diff={diff} loading={session.loading.commitDiff} onBack={onBackToDetails}/></section>}
+  </ResizableWorkspace>;
+}
+
+function CommitDetailsPane({ session, selected, details, selectedFile, onSelectFile, onCopyOid }: {
+  session: RepositorySession;
+  selected: CommitSummary | null;
+  details?: CommitDetails;
+  selectedFile: ChangedFile | null;
+  onSelectFile: (file: ChangedFile) => void;
+  onCopyOid: (oid: string) => void;
+}) {
+  return <section className="commit-detail">
+    {!selected ? <div className="commit-placeholder"><History size={32}/><h2>Select a commit</h2><p>Metadata and changed files load only after selection.</p></div>
+      : session.loading.commit && !details ? <DetailsSkeleton/>
+        : details ? <><div className="commit-heading"><div><span className="eyebrow">COMMIT</span><h2>{details.subject}</h2></div><button className="secondary" onClick={() => onCopyOid(details.oid)} title="Copy full commit ID"><Clipboard size={14}/>{details.shortOid}</button></div>{details.parents.length > 1 && <div className="merge-note"><GitBranch size={13}/>Merge commit · files and diffs are compared with first parent {details.parents[0].slice(0, 7)}</div>}<p className={`commit-message ${details.body ? "" : "muted"}`}>{details.body || "No additional commit message."}</p><div className="metadata"><div className="avatar">{details.author.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div><div><strong>{details.author}</strong><small>{details.email} · {new Date(details.timestamp * 1000).toLocaleString()}</small></div></div><div className="commit-files-title"><strong>Changed files</strong><span>{details.files.length} file{details.files.length === 1 ? "" : "s"}</span></div>{details.files.length === 0 ? <p className="empty-list">No files changed against the first parent.</p> : details.files.map((file) => {
+          const isSelected = !!selectedFile && commitFileKey(details.oid, selectedFile) === commitFileKey(details.oid, file);
+          return <button className={`commit-file ${isSelected ? "selected" : ""}`} aria-pressed={isSelected} key={`${file.status}:${file.oldPath ?? ""}:${file.path}`} onClick={() => onSelectFile(file)}><FileCode2 size={16}/><span>{file.path}{file.oldPath && <small>renamed from {file.oldPath}</small>}</span><b className={`status ${statusLabel(file.status)}`}>{statusLabel(file.status)}</b><ChevronRight size={14}/></button>;
+        })}</> : <div className="inline-error"><CircleAlert size={14}/>Commit details could not be loaded.</div>}
+  </section>;
 }
 
 function VirtualCommitList({ commits, selected, scrollTop, hasMore, loading, onScroll, onSelect, onLoadMore }: {

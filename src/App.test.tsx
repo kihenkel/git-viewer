@@ -37,6 +37,20 @@ describe("App", () => {
 
     expect(await screen.findByRole("button", { name: "Back to commit details" })).toBeVisible();
     expect(screen.getByText(/@@ -18,8 \+18,12 @@/)).toBeVisible();
+    expect(screen.getByText("Changed files")).toBeVisible();
+    expect(screen.getAllByRole("separator")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /src\/diff\.ts M/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("resizes local change panes with an accessible separator", () => {
+    const { container } = render(<App/>);
+    const workspace = container.querySelector<HTMLElement>(".changes-workspace");
+    const separator = screen.getByRole("separator", { name: "Resize panels 1 and 2" });
+
+    expect(workspace?.style.gridTemplateColumns).toBe("29fr 6px 71fr");
+    fireEvent.keyDown(separator, { key: "ArrowRight" });
+
+    expect(workspace?.style.gridTemplateColumns).toBe("31fr 6px 69fr");
   });
 
   it("applies a hunk directly from its contextual action", () => {
