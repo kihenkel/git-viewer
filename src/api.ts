@@ -27,6 +27,10 @@ export async function changeFile(path: string, file: string, oldFile: string | u
   return invoke("change_file", { path, file, oldFile: oldFile ?? null, section, action });
 }
 
+export async function resetRepository(path: string): Promise<void> {
+  return invoke("reset_repository", { path });
+}
+
 export async function trashInfo(path: string, file: string): Promise<TrashInfo> {
   return invoke("trash_info", { path, file });
 }

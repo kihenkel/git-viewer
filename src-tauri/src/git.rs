@@ -391,6 +391,13 @@ impl GitService {
         inspect_trash_target(&Path::new(path).join(file))
     }
 
+    pub fn reset_repository(path: &str) -> Result<(), String> {
+        if !Self::has_head(path)? {
+            return Err("Cannot discard changes because this repository has no commits".into());
+        }
+        Self::success(path, &["reset", "--hard", "HEAD"])
+    }
+
     pub fn apply_patch(
         path: &str,
         file: &str,
@@ -991,6 +998,28 @@ mod tests {
         let status = repository.git(&["status", "--porcelain"]);
         assert!(status.contains("D old.txt"));
         assert!(status.contains("?? new.txt"));
+    }
+
+    #[test]
+    fn hard_resets_staged_and_unstaged_changes_to_head() {
+        let repository = TestRepository::new("hard-reset");
+        repository.write("notes.txt", "committed\n");
+        repository.commit_all("initial");
+        repository.write("notes.txt", "staged\n");
+        repository.git(&["add", "notes.txt"]);
+        repository.write("notes.txt", "unstaged\n");
+        repository.write("untracked.txt", "kept\n");
+
+        GitService::reset_repository(repository.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(repository.0.join("notes.txt")).unwrap(),
+            "committed\n"
+        );
+        assert_eq!(
+            repository.git(&["status", "--porcelain"]),
+            "?? untracked.txt"
+        );
     }
 
     #[test]

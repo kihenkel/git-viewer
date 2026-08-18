@@ -2,12 +2,15 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 describe("App", () => {
   beforeEach(() => localStorage.clear());
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it("filters changed files by path", () => {
     render(<App/>);
@@ -59,6 +62,17 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stage hunk" }));
 
     expect(screen.getByRole("status")).toHaveTextContent("Staged 1 selected hunks");
+  });
+
+  it("confirms before discarding all tracked changes", () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<App/>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard all" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("This cannot be undone"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Untracked files will be kept"));
+    expect(screen.queryByText("Discard all changes is ready in the desktop app")).not.toBeInTheDocument();
   });
 
   it("falls back to explicit wheel scrolling for nested diff panes", () => {

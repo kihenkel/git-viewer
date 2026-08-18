@@ -62,6 +62,11 @@ async fn change_file(
 }
 
 #[tauri::command]
+async fn reset_repository(path: String) -> Result<(), String> {
+    run_blocking(move || GitService::reset_repository(&path)).await?
+}
+
+#[tauri::command]
 async fn trash_info(path: String, file: String) -> Result<git::TrashInfo, String> {
     run_blocking(move || GitService::trash_info(&path, &file)).await?
 }
@@ -111,6 +116,7 @@ pub fn run() {
             load_commit,
             load_diff,
             change_file,
+            reset_repository,
             trash_info,
             apply_patch
         ])

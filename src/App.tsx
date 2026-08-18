@@ -658,6 +658,27 @@ export default function App() {
     }
   }
 
+  async function discardAllChanges() {
+    if (!active || !session) return;
+    const confirmed = window.confirm(
+      `Discard all staged and unstaged changes in ${active.name} and reset to ${active.branch} HEAD? This cannot be undone. Untracked files will be kept.`,
+    );
+    if (!confirmed) return;
+    if (browserDemo) { setNotice("Discard all changes is ready in the desktop app"); return; }
+    updateSession(active.path, (current) => ({ ...current, actionError: null, loading: { ...current.loading, action: true } }));
+    try {
+      await api.resetRepository(active.path);
+      await refreshRepository(active.path);
+      setNotice("All staged and unstaged changes discarded");
+    } catch (error) {
+      const message = String(error);
+      updateSession(active.path, (current) => ({ ...current, actionError: message }));
+      setNotice(message);
+    } finally {
+      updateSession(active.path, (current) => ({ ...current, loading: { ...current.loading, action: false } }));
+    }
+  }
+
   async function applySelection(selectedHunks: Set<string>, selectedLines: Set<string>) {
     if (!active || !session || !selectedFile || !workingDiff) return;
     const patch = selectedLines.size
@@ -774,7 +795,7 @@ export default function App() {
         <button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Toggle sidebar"><Menu size={18}/></button>
         <div className="repo-title"><div className="title-icon">{active?.name.slice(0, 1).toUpperCase() || <Box/>}</div><div><h1>{active?.name ?? "Open a repository"}</h1><span>{active?.path ?? "Choose a local Git working tree"}</span></div></div>
         {active && !active.error && <div className="branch-pill"><GitBranch size={14}/><strong>{active.branch === "(detached)" ? "Detached HEAD" : active.branch}</strong>{active.ahead > 0 && <span>↑{active.ahead}</span>}{active.behind > 0 && <span>↓{active.behind}</span>}</div>}
-        <div className="top-actions"><button className="icon-button" onClick={rotateTheme} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>{theme === "dark" ? <Moon size={17}/> : theme === "light" ? <Sun size={17}/> : <CircleDot size={17}/>}</button><button className="refresh-button" disabled={!active || !!active.error || session?.loading.status} onClick={() => active && void refreshRepository(active.path)}><RefreshCw className={session?.loading.status ? "spin" : ""} size={15}/>Refresh <kbd>⌘R</kbd></button></div>
+        <div className="top-actions"><button className="icon-button" onClick={rotateTheme} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>{theme === "dark" ? <Moon size={17}/> : theme === "light" ? <Sun size={17}/> : <CircleDot size={17}/>}</button><button className="discard-all-button" disabled={!active || !!active.error || !active.head || !active.changes.some((file) => file.section !== "untracked") || session?.loading.action || session?.loading.status} onClick={() => void discardAllChanges()}><Trash2 size={15}/>Discard all</button><button className="refresh-button" disabled={!active || !!active.error || session?.loading.status || session?.loading.action} onClick={() => active && void refreshRepository(active.path)}><RefreshCw className={session?.loading.status ? "spin" : ""} size={15}/>Refresh <kbd>⌘R</kbd></button></div>
       </header>
 
       <nav className="tabs"><button className={session?.view === "changes" ? "active" : ""} onClick={() => setView("changes")}><Code2 size={16}/>Local changes{active && <span>{new Set(active.changes.map((file) => file.path)).size}</span>}</button><button className={session?.view === "history" ? "active" : ""} onClick={() => setView("history")}><History size={16}/>History</button></nav>
