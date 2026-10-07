@@ -11,12 +11,14 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveRestore, Box, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  CircleAlert, CircleDot, Clipboard, Code2, File, FileCode2, GitBranch,
-  History, Inbox, LoaderCircle, Menu, Minus, Moon, Plus, RefreshCw, Search, Sun,
+  CircleAlert, CircleDot, Clipboard, Code2, Eye, EyeOff, File, FileCode2, GitBranch,
+  History, Inbox, LoaderCircle, Menu, Minus, Moon, Plus, RefreshCw, Search, Settings, Sun,
   Trash2, X,
 } from "lucide-react";
 import * as api from "./api";
 import { parseDiff, patchForHunks, patchForLines } from "./diff";
+import { clearHideRules, compilePatterns, compileRules, isHidden, loadHideRules, saveHideRules } from "./hideRules";
+import type { RuleError } from "./hideRules";
 import { sampleCommitDetails, sampleCommits, sampleDiff, sampleRepositories } from "./sample";
 import type {
   ChangedFile, CommitDetails, CommitSummary, DiffDocument, GitVersion, Repository, Theme,
@@ -25,9 +27,11 @@ import type {
 const browserDemo = !("__TAURI_INTERNALS__" in window);
 const HISTORY_PAGE_SIZE = 100;
 const DIFF_CACHE_LIMIT = 20;
+// Cached diffs above this size (raw characters) are kept, marked stale, on auto-refresh.
+const AUTO_REFRESH_DIFF_LIMIT = 200_000;
 const COMMIT_CACHE_LIMIT = 50;
 const SCROLL_PANE_SELECTOR = ".repository-list,.file-panel,.diff-scroll,.commit-scroll,.commit-detail";
-type View = "changes" | "history";
+type View = "changes" | "history" | "settings";
 type LoadingState = {
   status: boolean;
   history: boolean;
@@ -48,6 +52,7 @@ interface RepositorySession {
   diffSelections: Record<string, { hunks: Set<string>; lines: Set<string> }>;
   diffCache: Record<string, DiffDocument>;
   diffOrder: string[];
+  staleDiffKeys: string[];
   commits: CommitSummary[];
   historyHead: string | null | undefined;
   historyHasMore: boolean;
@@ -65,6 +70,10 @@ interface RepositorySession {
   historyScrollTop: number;
   loading: LoadingState;
   actionError: string | null;
+  hidePatterns: string[];
+  hideEnabled: boolean;
+  hideDraft: string;
+  hideErrors: RuleError[];
 }
 
 const idleLoading = (): LoadingState => ({
@@ -106,6 +115,7 @@ function createSession(repository: Repository): RepositorySession {
     ? repository.changes[0] ?? null
     : null;
   const previewKey = previewFile ? changedFileKey(previewFile) : null;
+  const hideRules = loadHideRules(repository.path);
   return {
     view: "changes",
     fileFilter: "",
@@ -117,6 +127,7 @@ function createSession(repository: Repository): RepositorySession {
     diffSelections: {},
     diffCache: previewKey ? { [previewKey]: parseDiff(sampleDiff) } : {},
     diffOrder: previewKey ? [previewKey] : [],
+    staleDiffKeys: [],
     commits: browserDemo ? sampleCommits : [],
     historyHead: browserDemo ? repository.head : undefined,
     historyHasMore: false,
@@ -134,6 +145,10 @@ function createSession(repository: Repository): RepositorySession {
     historyScrollTop: 0,
     loading: idleLoading(),
     actionError: null,
+    hidePatterns: hideRules.patterns,
+    hideEnabled: hideRules.enabled,
+    hideDraft: hideRules.patterns.join("\n"),
+    hideErrors: [],
   };
 }
 
@@ -371,6 +386,7 @@ export default function App() {
           ...session,
           diffCache: cached.cache,
           diffOrder: cached.order,
+          staleDiffKeys: session.staleDiffKeys.filter((staleKey) => staleKey !== key),
           workingDiffKey: stillSelected ? key : session.workingDiffKey,
           selectedLines,
           selectedHunks,
@@ -392,7 +408,7 @@ export default function App() {
     }
   }, [beginRequest, isLatestRequest, updateSession]);
 
-  const refreshRepository = useCallback(async (path: string) => {
+  const refreshRepository = useCallback(async (path: string, auto = false) => {
     if (browserDemo) return repositoriesRef.current.find((repository) => repository.path === path) ?? null;
     const requestKey = `status:${path}`;
     const requestId = beginRequest(requestKey);
@@ -405,9 +421,19 @@ export default function App() {
       const selectedFile = previous?.selectedFileKey
         ? repository.changes.find((file) => changedFileKey(file) === previous.selectedFileKey)
         : undefined;
+      const selectedKey = selectedFile ? changedFileKey(selectedFile) : null;
+      const isLarge = (key: string) => (previous?.diffCache[key]?.raw.length ?? 0) > AUTO_REFRESH_DIFF_LIMIT;
+      // Auto-refresh keeps large cached diffs (marked stale) to stay fast; a manual refresh drops everything but the selected file.
+      const currentKeys = new Set(repository.changes.map(changedFileKey));
+      const keptKeys = (previous?.diffOrder ?? []).filter((key) => currentKeys.has(key) && (key === selectedKey || (auto && isLarge(key))));
+      const staleKeys = auto ? keptKeys.filter(isLarge) : [];
+      const reloadSelected = !!selectedFile && !(auto && selectedKey && isLarge(selectedKey));
       updateSession(path, (session) => ({
         ...session,
-        selectedFileKey: selectedFile ? changedFileKey(selectedFile) : null,
+        diffCache: Object.fromEntries(keptKeys.filter((key) => session.diffCache[key]).map((key) => [key, session.diffCache[key]])),
+        diffOrder: keptKeys.filter((key) => session.diffCache[key]),
+        staleDiffKeys: staleKeys,
+        selectedFileKey: selectedKey,
         workingDiffKey: selectedFile ? session.workingDiffKey : null,
         selectedHunks: selectedFile ? session.selectedHunks : new Set(),
         selectedLines: selectedFile ? session.selectedLines : new Set(),
@@ -417,7 +443,7 @@ export default function App() {
       if (previous?.historyHead === undefined || previous.historyHead !== repository.head) {
         void loadHistoryPage(path, true, repository.head);
       }
-      if (selectedFile) void loadWorkingDiff(path, selectedFile, true);
+      if (selectedFile && reloadSelected) void loadWorkingDiff(path, selectedFile, true);
       return repository;
     } catch (error) {
       if (!isLatestRequest(requestKey, requestId)) return null;
@@ -543,7 +569,7 @@ export default function App() {
       window.clearTimeout(focusTimer.current);
       focusTimer.current = window.setTimeout(() => {
         const path = activePathRef.current;
-        if (path) void refreshRepository(path);
+        if (path) void refreshRepository(path, true);
       }, 250);
     };
     window.addEventListener("focus", onFocus);
@@ -564,6 +590,22 @@ export default function App() {
     : null;
   const selectedCommitDetails = selectedCommit ? session?.commitDetails[selectedCommit.oid] : undefined;
   const selectedCommitDiff = session?.commitDiffKey ? session.commitDiffCache[session.commitDiffKey] : undefined;
+  const hidePatterns = session?.hidePatterns;
+  const hideMatchers = useMemo(() => compilePatterns(hidePatterns ?? []), [hidePatterns]);
+  const hiding = !!session?.hideEnabled && hideMatchers.length > 0;
+  const hiddenFiles = hiding && active ? active.changes.filter((file) => isHidden(file, hideMatchers)) : [];
+  const selectedHidden = hiding && !!selectedFile && isHidden(selectedFile, hideMatchers);
+
+  useEffect(() => {
+    if (!selectedHidden || !active) return;
+    updateSession(active.path, (current) => ({
+      ...current,
+      selectedFileKey: null,
+      workingDiffKey: null,
+      selectedHunks: new Set(),
+      selectedLines: new Set(),
+    }));
+  }, [active, selectedHidden, updateSession]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -607,6 +649,7 @@ export default function App() {
     const current = repositoriesRef.current;
     const index = current.findIndex((repository) => repository.path === path);
     const next = current.filter((repository) => repository.path !== path);
+    clearHideRules(path);
     repositoriesRef.current = next;
     setRepositories(next);
     setSessions((items) => {
@@ -660,8 +703,10 @@ export default function App() {
 
   async function discardAllChanges() {
     if (!active || !session) return;
+    const hiddenTracked = new Set(hiddenFiles.filter((file) => file.section !== "untracked").map((file) => file.path)).size;
+    const hiddenNote = hiddenTracked > 0 ? ` This includes ${hiddenTracked} hidden file${hiddenTracked === 1 ? "" : "s"}.` : "";
     const confirmed = window.confirm(
-      `Discard all staged and unstaged changes in ${active.name} and reset to ${active.branch} HEAD? This cannot be undone. Untracked files will be kept.`,
+      `Discard all staged and unstaged changes in ${active.name} and reset to ${active.branch} HEAD? This cannot be undone. Untracked files will be kept.${hiddenNote}`,
     );
     if (!confirmed) return;
     if (browserDemo) { setNotice("Discard all changes is ready in the desktop app"); return; }
@@ -740,6 +785,31 @@ export default function App() {
     void loadCommitDiff(active.path, selectedCommit, file);
   }
 
+  function applyHideRules() {
+    if (!active || !session) return;
+    const { patterns, errors } = compileRules(session.hideDraft);
+    if (errors.length) {
+      updateSession(active.path, (current) => ({ ...current, hideErrors: errors }));
+      return;
+    }
+    const enabled = patterns.length > 0 && (session.hidePatterns.length === 0 || session.hideEnabled);
+    saveHideRules(active.path, { patterns, enabled });
+    updateSession(active.path, (current) => ({
+      ...current,
+      hidePatterns: patterns,
+      hideEnabled: enabled,
+      hideErrors: [],
+    }));
+    setNotice(patterns.length ? `Hiding rules applied (${patterns.length} pattern${patterns.length === 1 ? "" : "s"})` : "Hiding rules cleared");
+  }
+
+  function toggleHide() {
+    if (!active || !session) return;
+    const enabled = !session.hideEnabled;
+    saveHideRules(active.path, { patterns: session.hidePatterns, enabled });
+    updateSession(active.path, (current) => ({ ...current, hideEnabled: enabled }));
+  }
+
   function setView(view: View) {
     if (!active) return;
     updateSession(active.path, (current) => ({ ...current, view }));
@@ -760,10 +830,12 @@ export default function App() {
   if (gitVersion && !gitVersion.available) return <GitMissing error={gitVersion.error} onRetry={retryGit}/>;
   if (!gitVersion || initializing) return <BootScreen/>;
 
+  const fileQuery = session?.fileFilter.trim().toLocaleLowerCase() ?? "";
+  const visibleFiles = active?.changes.filter((file) => !(hiding && isHidden(file, hideMatchers)) && file.path.toLocaleLowerCase().includes(fileQuery)) ?? [];
   const grouped = {
-    staged: active?.changes.filter((file) => file.section === "staged" && file.path.toLocaleLowerCase().includes(session?.fileFilter.trim().toLocaleLowerCase() ?? "")) ?? [],
-    unstaged: active?.changes.filter((file) => file.section === "unstaged" && file.path.toLocaleLowerCase().includes(session?.fileFilter.trim().toLocaleLowerCase() ?? "")) ?? [],
-    untracked: active?.changes.filter((file) => file.section === "untracked" && file.path.toLocaleLowerCase().includes(session?.fileFilter.trim().toLocaleLowerCase() ?? "")) ?? [],
+    staged: visibleFiles.filter((file) => file.section === "staged"),
+    unstaged: visibleFiles.filter((file) => file.section === "unstaged"),
+    untracked: visibleFiles.filter((file) => file.section === "untracked"),
   };
 
   return <div className="app-shell" ref={appShell}>
@@ -795,10 +867,10 @@ export default function App() {
         <button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Toggle sidebar"><Menu size={18}/></button>
         <div className="repo-title"><div className="title-icon">{active?.name.slice(0, 1).toUpperCase() || <Box/>}</div><div><h1>{active?.name ?? "Open a repository"}</h1><span>{active?.path ?? "Choose a local Git working tree"}</span></div></div>
         {active && !active.error && <div className="branch-pill"><GitBranch size={14}/><strong>{active.branch === "(detached)" ? "Detached HEAD" : active.branch}</strong>{active.ahead > 0 && <span>↑{active.ahead}</span>}{active.behind > 0 && <span>↓{active.behind}</span>}</div>}
-        <div className="top-actions"><button className="icon-button" onClick={rotateTheme} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>{theme === "dark" ? <Moon size={17}/> : theme === "light" ? <Sun size={17}/> : <CircleDot size={17}/>}</button><button className="discard-all-button" disabled={!active || !!active.error || !active.head || !active.changes.some((file) => file.section !== "untracked") || session?.loading.action || session?.loading.status} onClick={() => void discardAllChanges()}><Trash2 size={15}/>Discard all</button><button className="refresh-button" disabled={!active || !!active.error || session?.loading.status || session?.loading.action} onClick={() => active && void refreshRepository(active.path)}><RefreshCw className={session?.loading.status ? "spin" : ""} size={15}/>Refresh <kbd>⌘R</kbd></button></div>
+        <div className="top-actions"><button className="icon-button" onClick={rotateTheme} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>{theme === "dark" ? <Moon size={17}/> : theme === "light" ? <Sun size={17}/> : <CircleDot size={17}/>}</button><button className="discard-all-button" disabled={!active || !!active.error || !active.head || !active.changes.some((file) => file.section !== "untracked") || session?.loading.action || session?.loading.status} onClick={() => void discardAllChanges()}><Trash2 size={15}/>Discard all</button><button className="refresh-button" disabled={!active || !!active.error || !selectedFile || session?.loading.diff || session?.loading.action} title="Reload the diff of the selected file" onClick={() => active && selectedFile && void loadWorkingDiff(active.path, selectedFile, true)}><RefreshCw className={session?.loading.diff ? "spin" : ""} size={15}/>Refresh file</button><button className="refresh-button" disabled={!active || !!active.error || session?.loading.status || session?.loading.action} onClick={() => active && void refreshRepository(active.path)}><RefreshCw className={session?.loading.status ? "spin" : ""} size={15}/>Refresh all <kbd>⌘R</kbd></button></div>
       </header>
 
-      <nav className="tabs"><button className={session?.view === "changes" ? "active" : ""} onClick={() => setView("changes")}><Code2 size={16}/>Local changes{active && <span>{new Set(active.changes.map((file) => file.path)).size}</span>}</button><button className={session?.view === "history" ? "active" : ""} onClick={() => setView("history")}><History size={16}/>History</button></nav>
+      <nav className="tabs"><button className={session?.view === "changes" ? "active" : ""} onClick={() => setView("changes")}><Code2 size={16}/>Local changes{active && <span>{new Set(active.changes.map((file) => file.path)).size}</span>}</button><button className={session?.view === "history" ? "active" : ""} onClick={() => setView("history")}><History size={16}/>History</button><button className={`settings-tab ${session?.view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Settings size={16}/>Settings{!!session?.hidePatterns.length && <i className="settings-dot" aria-label="Hiding rules configured"/>}</button></nav>
 
       {!active ? <EmptyState onOpen={addRepository}/>
         : active.error ? <RepositoryUnavailable repository={active} onRetry={() => void refreshRepository(active.path)} onRemove={() => removeRepository(active.path)}/>
@@ -811,14 +883,21 @@ export default function App() {
         >
           <ChangeList
             grouped={grouped}
+            staleKeys={session.staleDiffKeys}
             selected={selectedFile}
             filter={session.fileFilter}
             scrollTop={session.fileScrollTop}
+            hideAvailable={hideMatchers.length > 0}
+            hideEnabled={session.hideEnabled}
+            hiddenCount={hiddenFiles.length}
+            onToggleHide={toggleHide}
+            onOpenSettings={() => setView("settings")}
             onFilter={(fileFilter) => updateSession(active.path, (current) => ({ ...current, fileFilter, fileScrollTop: 0 }))}
             onScroll={(fileScrollTop) => updateSession(active.path, (current) => ({ ...current, fileScrollTop }))}
             onSelect={selectFile}
           />
           <DiffPanel
+            stale={!!session.workingDiffKey && session.staleDiffKeys.includes(session.workingDiffKey)}
             diff={workingDiff}
             file={selectedFile}
             loading={session.loading.diff}
@@ -846,7 +925,12 @@ export default function App() {
             onApplyHunk={(hunkId) => void applySelection(new Set([hunkId]), new Set())}
             onAction={fileAction}
           />
-        </ResizableWorkspace> : <HistoryView
+        </ResizableWorkspace> : session.view === "settings" ? <RepositorySettings
+          session={session}
+          onDraftChange={(hideDraft) => updateSession(active.path, (current) => ({ ...current, hideDraft }))}
+          onApply={applyHideRules}
+          onRevert={() => updateSession(active.path, (current) => ({ ...current, hideDraft: current.hidePatterns.join("\n"), hideErrors: [] }))}
+        /> : <HistoryView
           session={session}
           selected={selectedCommit}
           details={selectedCommitDetails}
@@ -961,11 +1045,17 @@ function ResizableWorkspace({ className, sizes, minSizes, onSizesChange, childre
   </div>;
 }
 
-function ChangeList({ grouped, selected, filter, scrollTop, onFilter, onScroll, onSelect }: {
+function ChangeList({ grouped, staleKeys, selected, filter, scrollTop, hideAvailable, hideEnabled, hiddenCount, onToggleHide, onOpenSettings, onFilter, onScroll, onSelect }: {
   grouped: { staged: ChangedFile[]; unstaged: ChangedFile[]; untracked: ChangedFile[] };
+  staleKeys: string[];
   selected: ChangedFile | null;
   filter: string;
   scrollTop: number;
+  hideAvailable: boolean;
+  hideEnabled: boolean;
+  hiddenCount: number;
+  onToggleHide: () => void;
+  onOpenSettings: () => void;
   onFilter: (value: string) => void;
   onScroll: (value: number) => void;
   onSelect: (file: ChangedFile) => void;
@@ -975,19 +1065,21 @@ function ChangeList({ grouped, selected, filter, scrollTop, onFilter, onScroll, 
     if (panel.current && Math.abs(panel.current.scrollTop - scrollTop) > 1) panel.current.scrollTop = scrollTop;
   }, [scrollTop]);
   return <section className="file-panel" ref={panel} onScroll={(event) => onScroll(event.currentTarget.scrollTop)}>
-    <div className="panel-toolbar"><div className="search"><Search size={14}/><input data-file-filter aria-label="Filter files" placeholder="Filter files…" value={filter} onChange={(event) => onFilter(event.target.value)}/><kbd>⌘F</kbd></div></div>
-    <ChangeGroup title="Staged changes" files={grouped.staged} selected={selected} onSelect={onSelect} accent="green" filtered={!!filter}/>
-    <ChangeGroup title="Changes" files={grouped.unstaged} selected={selected} onSelect={onSelect} accent="amber" filtered={!!filter}/>
-    <ChangeGroup title="Untracked files" files={grouped.untracked} selected={selected} onSelect={onSelect} accent="blue" filtered={!!filter}/>
+    <div className="panel-toolbar"><div className="search"><Search size={14}/><input data-file-filter aria-label="Filter files" placeholder="Filter files…" value={filter} onChange={(event) => onFilter(event.target.value)}/><kbd>⌘F</kbd></div>{hideAvailable && <button className={`icon-button hide-toggle ${hideEnabled ? "active" : ""}`} aria-pressed={hideEnabled} aria-label="Hide matching files" title={hideEnabled ? "Hiding files matching your rules – click to show all" : "Showing all files – click to hide files matching your rules"} onClick={onToggleHide}>{hideEnabled ? <EyeOff size={15}/> : <Eye size={15}/>}</button>}</div>
+    {hideAvailable && hideEnabled && hiddenCount > 0 && <button className="hidden-note" title="Edit hiding rules" onClick={onOpenSettings}><EyeOff size={12}/>{hiddenCount} file{hiddenCount === 1 ? "" : "s"} hidden by rules</button>}
+    <ChangeGroup title="Staged changes" files={grouped.staged} selected={selected} staleKeys={staleKeys} onSelect={onSelect} accent="green" filtered={!!filter}/>
+    <ChangeGroup title="Changes" files={grouped.unstaged} selected={selected} staleKeys={staleKeys} onSelect={onSelect} accent="amber" filtered={!!filter}/>
+    <ChangeGroup title="Untracked files" files={grouped.untracked} selected={selected} staleKeys={staleKeys} onSelect={onSelect} accent="blue" filtered={!!filter}/>
   </section>;
 }
 
-function ChangeGroup({ title, files, selected, onSelect, accent, filtered }: { title: string; files: ChangedFile[]; selected: ChangedFile | null; onSelect: (file: ChangedFile) => void; accent: string; filtered: boolean }) {
+function ChangeGroup({ title, files, staleKeys, selected, onSelect, accent, filtered }: { title: string; files: ChangedFile[]; staleKeys: string[]; selected: ChangedFile | null; onSelect: (file: ChangedFile) => void; accent: string; filtered: boolean }) {
   const [expanded, setExpanded] = useState(true);
-  return <div className="change-group"><button className="group-title" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>{expanded ? <ChevronDown/> : <ChevronRight/>}<span className={`dot ${accent}`}/><strong>{title}</strong><span className="group-count">{files.length}</span></button>{expanded && <div>{files.length === 0 ? <p className="empty-group">{filtered ? "No matching files" : `No ${title.toLowerCase()}`}</p> : files.map((file) => <button key={changedFileKey(file)} className={`file-row ${selected && changedFileKey(selected) === changedFileKey(file) ? "selected" : ""}`} onClick={() => onSelect(file)}><FileCode2 size={16}/><span><strong>{file.path.split("/").pop()}</strong><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "."}</small></span><b className={`status ${statusLabel(file.status)}`}>{statusLabel(file.status)}</b></button>)}</div>}</div>;
+  return <div className="change-group"><button className="group-title" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>{expanded ? <ChevronDown/> : <ChevronRight/>}<span className={`dot ${accent}`}/><strong>{title}</strong><span className="group-count">{files.length}</span></button>{expanded && <div>{files.length === 0 ? <p className="empty-group">{filtered ? "No matching files" : `No ${title.toLowerCase()}`}</p> : files.map((file) => <button key={changedFileKey(file)} className={`file-row ${selected && changedFileKey(selected) === changedFileKey(file) ? "selected" : ""}`} onClick={() => onSelect(file)}><FileCode2 size={16}/><span><strong>{file.path.split("/").pop()}</strong><small>{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "."}</small></span>{staleKeys.includes(changedFileKey(file)) && <span className="stale-dot" title="Diff may be outdated – use Refresh file" aria-label="Diff may be outdated"/>}<b className={`status ${statusLabel(file.status)}`}>{statusLabel(file.status)}</b></button>)}</div>}</div>;
 }
 
-function DiffPanel({ diff, file, loading, busy, error, selectedHunks, setSelectedHunks, selectedLines, setSelectedLines, onApply, onApplyHunk, onAction }: {
+function DiffPanel({ stale, diff, file, loading, busy, error, selectedHunks, setSelectedHunks, selectedLines, setSelectedLines, onApply, onApplyHunk, onAction }: {
+  stale?: boolean;
   diff?: DiffDocument;
   file: ChangedFile | null;
   loading: boolean;
@@ -1010,11 +1102,34 @@ function DiffPanel({ diff, file, loading, busy, error, selectedHunks, setSelecte
   const toggleHunk = (id: string) => { const next = new Set(selectedHunks); if (next.has(id)) next.delete(id); else next.add(id); setSelectedLines(new Set()); setSelectedHunks(next); };
   const toggleLine = (id: string) => { const next = new Set(selectedLines); if (next.has(id)) next.delete(id); else next.add(id); setSelectedHunks(new Set()); setSelectedLines(next); };
   return <section className="diff-panel" aria-busy={loading || busy}>
-    <div className="diff-toolbar"><div className="file-breadcrumb"><FileCode2 size={16}/><strong>{file.path.split("/").pop()}</strong><span>{file.path}</span>{loading && <LoaderCircle className="spin" size={13}/>}</div><div className="diff-actions"><button className="secondary" disabled={busy} onClick={() => onAction(file.section === "staged" ? "unstage" : "stage")}>{file.section === "staged" ? <Minus/> : <Plus/>}{verb} file</button>{interactive && <button className="primary" disabled={busy || (!selectedHunks.size && !selectedLines.size)} onClick={onApply}>{busy && <LoaderCircle className="spin"/>}{verb} selected</button>}{file.section !== "staged" && <button className="icon-button danger" disabled={busy} title={file.section === "untracked" ? "Move to Trash" : "Discard changes"} aria-label={file.section === "untracked" ? "Move to Trash" : "Discard changes"} onClick={() => onAction(file.section === "untracked" ? "trash" : "discard")}><Trash2 size={16}/></button>}</div></div>
+    <div className="diff-toolbar"><div className="file-breadcrumb"><FileCode2 size={16}/><strong>{file.path.split("/").pop()}</strong><span>{file.path}</span>{loading && <LoaderCircle className="spin" size={13}/>}{stale && <em className="stale-badge" title="This large diff was not reloaded automatically. Use Refresh file.">Outdated</em>}</div><div className="diff-actions"><button className="secondary" disabled={busy} onClick={() => onAction(file.section === "staged" ? "unstage" : "stage")}>{file.section === "staged" ? <Minus/> : <Plus/>}{verb} file</button>{interactive && <button className="primary" disabled={busy || (!selectedHunks.size && !selectedLines.size)} onClick={onApply}>{busy && <LoaderCircle className="spin"/>}{verb} selected</button>}{file.section !== "staged" && <button className="icon-button danger" disabled={busy} title={file.section === "untracked" ? "Move to Trash" : "Discard changes"} aria-label={file.section === "untracked" ? "Move to Trash" : "Discard changes"} onClick={() => onAction(file.section === "untracked" ? "trash" : "discard")}><Trash2 size={16}/></button>}</div></div>
     <div className="diff-stats"><span className="additions">+{additions}</span><span className="deletions">−{deletions}</span><span className="stat-bar" aria-hidden="true"><i style={{ width: `${additions + deletions ? additions / (additions + deletions) * 100 : 0}%` }}/><i style={{ width: `${additions + deletions ? deletions / (additions + deletions) * 100 : 0}%` }}/></span><span>{file.section === "staged" ? "Index vs HEAD" : file.section === "unstaged" ? "Worktree vs index" : "Untracked file"}</span></div>
     {diff?.lineSelectionReason && <div className="selection-note"><CircleAlert size={13}/><span>{diff.lineSelectionReason}</span></div>}
     {error && <div className="inline-error" role="alert"><CircleAlert size={14}/><span>{error}</span></div>}
     <div className="diff-scroll">{!diff || diff.binary ? <div className="binary"><ArchiveRestore/><h3>{diff?.binary ? "Binary file" : "No textual diff"}</h3><p>{diff?.binary ? "Git cannot display a textual diff for this file." : "Git reported no textual changes for this file."}</p></div> : diff.hunks.map((hunk) => <div className="hunk" key={hunk.id}><div className="hunk-header">{interactive && <label><input aria-label={`Select hunk ${hunk.header}`} type="checkbox" checked={selectedHunks.has(hunk.id)} onChange={() => toggleHunk(hunk.id)}/><span/></label>}<code>{hunk.header}</code>{interactive && <button disabled={busy} onClick={() => onApplyHunk(hunk.id)}>{verb} hunk</button>}</div>{hunk.lines.map((line) => <div key={line.id} className={`diff-line ${line.kind}`}><span className="line-select">{interactive && line.selectable && <input aria-label={`${line.kind === "add" ? "Select added" : "Select removed"} line ${line.newNumber ?? line.oldNumber}: ${line.content.slice(1, 80)}`} type="checkbox" checked={selectedLines.has(line.id)} onChange={() => toggleLine(line.id)}/>}</span><span className="line-no">{line.oldNumber}</span><span className="line-no">{line.newNumber}</span><code>{line.content || " "}</code></div>)}</div>)}</div>
+  </section>;
+}
+
+function RepositorySettings({ session, onDraftChange, onApply, onRevert }: {
+  session: RepositorySession;
+  onDraftChange: (value: string) => void;
+  onApply: () => void;
+  onRevert: () => void;
+}) {
+  const dirty = session.hideDraft.trim() !== session.hidePatterns.join("\n").trim();
+  return <section className="settings-panel">
+    <div className="settings-section">
+      <h2>Hidden files</h2>
+      <p>Files matching these patterns are hidden from <strong>Local changes</strong> while hiding is on. Use the eye toggle next to the file filter to show everything again. One gitignore-style glob per line, and lines starting with <code>#</code> are ignored.</p>
+      <p className="settings-examples"><code>*.test.ts*</code> matches at any depth · <code>tests/**</code> is relative to the repository root · <code>**/__snapshots__/</code> matches a directory at any depth</p>
+      <textarea aria-label="Hidden file patterns" spellCheck={false} placeholder={"*.test.ts*\ntests/**"} value={session.hideDraft} onChange={(event) => onDraftChange(event.target.value)}/>
+      {session.hideErrors.length > 0 && <div className="inline-error settings-errors" role="alert"><CircleAlert size={14}/><ul>{session.hideErrors.map((error) => <li key={error.line}>Line {error.line}: {error.message}</li>)}</ul></div>}
+      <div className="settings-actions">
+        {dirty && <span className="settings-dirty">Unapplied changes</span>}
+        {dirty && <button className="secondary" onClick={onRevert}>Revert</button>}
+        <button className="primary" disabled={!dirty} onClick={onApply}>Apply</button>
+      </div>
+    </div>
   </section>;
 }
 
